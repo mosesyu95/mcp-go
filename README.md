@@ -198,6 +198,9 @@ func main() {
 
 The [Model Context Protocol (MCP)](https://modelcontextprotocol.io) lets you build servers that expose data and functionality to LLM applications in a secure, standardized way. Think of it like a web API, but specifically designed for LLM interactions. MCP servers can:
 
+mcp-go implements the Model Context Protocol specification version 2025-11-25, with backward compatibility for versions 2025-06-18, 2025-03-26, and 2024-11-05.
+
+MCP servers can:
 - Expose data through **Resources** (think of these sort of like GET endpoints; they are used to load information into the LLM's context)
 - Provide functionality through **Tools** (sort of like POST endpoints; they are used to execute code or otherwise produce a side effect)
 - Define interaction patterns through **Prompts** (reusable templates for LLM interactions)
@@ -775,3 +778,114 @@ go generate ./...
 You need `go` installed and the `goimports` tool available. The generator runs
 `goimports` automatically to format and fix imports.
 
+### Auto-completions
+
+When users are filling in argument values for a specific prompt (identified by name) or resource template (identified by URI), servers can provide contextual suggestions.
+To enable completion support, use the `server.WithCompletions()` option when creating your server.
+
+#### Completion Providers
+
+You can provide completion logic for both prompt arguments and resource template arguments by implementing the respective interfaces and passing them to the server as options.
+
+<details>
+<summary>Show Completion Provider Examples</summary>
+
+```go
+type MyPromptCompletionProvider struct{}
+
+func (p *MyPromptCompletionProvider) CompletePromptArgument(
+    ctx context.Context,
+    promptName string,
+    argument mcp.CompleteArgument,
+    context mcp.CompleteContext,
+) (*mcp.Completion, error) {
+    // Example: provide style suggestions for a "code_review" prompt
+    if promptName == "code_review" && argument.Name == "style" {
+        styles := []string{"formal", "casual", "technical", "creative"}
+        var suggestions []string
+        
+        // Filter based on current input
+        for _, style := range styles {
+            if strings.HasPrefix(style, argument.Value) {
+                suggestions = append(suggestions, style)
+            }
+        }
+        
+        return &mcp.Completion{
+            Values: suggestions,
+        }, nil
+    }
+    
+    // Return empty suggestions for unhandled cases
+    return &mcp.Completion{Values: []string{}}, nil
+}
+
+type MyResourceCompletionProvider struct{}
+
+func (p *MyResourceCompletionProvider) CompleteResourceArgument(
+    ctx context.Context,
+    uri string,
+    argument mcp.CompleteArgument,
+    context mcp.CompleteContext,
+) (*mcp.Completion, error) {
+    // Example: provide file path completions
+    if uri == "file:///{path}" && argument.Name == "path" {
+        // You can access previously completed arguments from context.Arguments
+        // context.Arguments is a map[string]string of already-resolved arguments
+        
+        paths := getMatchingPaths(argument.Value) // Your custom logic
+        
+        return &mcp.Completion{
+            Values:  paths[:min(len(paths), 100)], // Max 100 items
+            Total:   len(paths),                    // Total available matches
+            HasMore: len(paths) > 100,              // More results available
+        }, nil
+    }
+    
+    return &mcp.Completion{Values: []string{}}, nil
+}
+
+// Register the provider
+mcpServer := server.NewMCPServer(
+    "my-server",
+    "1.0.0",
+    server.WithCompletions(),
+    server.WithPromptCompletionProvider(&MyPromptCompletionProvider{}),
+    server.WithResourceCompletionProvider(&MyResourceCompletionProvider{}),
+)
+```
+
+</details>
+
+#### Completion Context
+
+For prompts or resource templates with multiple arguments, the `CompleteContext` parameter provides access to previously completed arguments. This allows you to provide contextual suggestions based on earlier choices.
+
+<details>
+<summary>Show Completion Context Example</summary>
+
+```go
+func (p *MyProvider) CompleteResourceArgument(
+    ctx context.Context,
+    uri string,
+    argument mcp.CompleteArgument,
+    context mcp.CompleteContext,
+) (*mcp.Completion, error) {
+    // Access previously completed arguments
+    if previousValue, ok := context.Arguments["previous_arg"]; ok {
+        // Provide suggestions based on previous_arg value
+        return getSuggestionsFor(argument.Value, previousValue), nil
+    }
+    
+    return &mcp.Completion{Values: []string{}}, nil
+}
+```
+
+</details>
+
+#### Response Constraints
+
+When returning completion results:
+- Maximum 100 items per response
+- Use `Total` to indicate the total number of available matches
+- Use `HasMore` to signal if additional results exist beyond the returned values
